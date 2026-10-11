@@ -566,7 +566,7 @@ bool DeviceSet::tryCompletePendingInput(int& completedIob)
         if (status == nullptr || status->unitBlock != p.second->unitBlock) continue;
         int unit = p.second->unit;
         applyC1Response(p.first, status->bytes);
-        inputResponseStatus_.erase(unit);
+        retireC1ResponseStatus(unit);
         pendingC1Completions_.erase(p.first);
         IoBlock::complete(m_, p.first, 0);
         completedIob = p.first;
@@ -1055,7 +1055,7 @@ bool DeviceSet::beginOutputRequest(int iob, bool withInvite, bool& phaseResult)
         const InputResponseStatus* responseStatus = inputResponseStatus_.find(unit);
         if (responseStatus != nullptr && responseStatus->unitBlock == unitBlock) {
             applyC1Response(iob, responseStatus->bytes);
-            inputResponseStatus_.erase(unit);
+            retireC1ResponseStatus(unit);
             trace_.ws("  class C1 response completion -> wssmfrt; wscmdend/wsavstat imported and consumed one input WSCF");
             IoBlock::complete(m_, iob, 0);
             phaseResult = true;
@@ -1498,6 +1498,24 @@ void DeviceSet::applyC1Response(int iob, const std::vector<uint8_t>& responseSta
     if (tub <= 0 || m_.readHalf(tub) != WorkStationIob::kUnitBlockEyecatcher || responseStatus.size() != 12) return;
     for (int n = 0; n < 12; n++) m_.writeByte(tub + 0x13 + n, responseStatus[static_cast<std::size_t>(n)]);
     m_.writeByte(tub + 0x8D, responseStatus[1]);
+}
+
+// A C1 pass imports the response status, but the terminal record that
+// carried it - the operator's typed fields - is still queued for SSP's
+// following Read Input Fields, and a pending read completes only while its
+// unit's response status is present.  Retiring the status here stranded that
+// read, so SSP parsed a stale buffer: a typed reply to a console message was
+// refused (SYS-5568 too many characters).  Keep the status while the record
+// is unread; the Read Input Fields that consumes it, or the next A7, retires
+// it.
+void DeviceSet::retireC1ResponseStatus(int unit)
+{
+    WorkStationSlot* slot = workStations_.find(unit);
+    if (slot != nullptr && !slot->isPrinter && slot->backend()->pendingInput() > 0) {
+        trace_.ws("  unit {:02X} response status kept: its field record is unread and awaits Read Input Fields", unit);
+        return;
+    }
+    inputResponseStatus_.erase(unit);
 }
 
 bool DeviceSet::readCurrentConfiguration(int iob)

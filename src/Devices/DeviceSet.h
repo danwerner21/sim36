@@ -298,6 +298,7 @@ private:
     bool restoreScreen(int iob, WorkStationSlot& slot);
     bool outputData(int iob, WorkStationSlot& slot, bool withInvite);
     void applyC1Response(int iob, const std::vector<uint8_t>& responseStatus);
+    void retireC1ResponseStatus(int unit);
     bool readCurrentConfiguration(int iob);
     bool configureNewWorkStations(int iob);
     bool captureBuffer(int bufferField, int length, bool forWrite, std::vector<int>& addresses);
