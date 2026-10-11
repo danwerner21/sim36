@@ -454,8 +454,22 @@ bool As36ControlStorageProcessor::deliverWorkStationControllerFunction(int tub, 
     const int target = findTaskById(0x0009, 0);
     const bool wasWaiting = target != 0 && (m_.readByte(target + TaskBlock::kOffStat2) & kWaitEvent) != 0;
     const bool accepted = postPowerOnInternalCondition(call + " nupoic00", resumeFromMonitor);
-    if (postedGuestWork != nullptr && accepted && wasWaiting)
-        *postedGuestWork = (m_.readByte(target + TaskBlock::kOffStat2) & kWaitEvent) == 0;
+    const bool woke = accepted && wasWaiting && (m_.readByte(target + TaskBlock::kOffStat2) & kWaitEvent) == 0;
+    if (postedGuestWork != nullptr) *postedGuestWork = woke;
+    // Waking task 0009 dispatches it at once.  With the MSP running the
+    // dispatcher swaps the live registers itself; with the MSP stopped at the
+    // no-task exit it only repoints the ATR file, and the processor would
+    // resume the newly dispatched router on the previous task's IAR and index
+    // registers under the router's translation (a System Request from an
+    // idle console faulted at the old task's IAR, or reached a nonsense SVC
+    // 2F).  Load the dispatched task's saved registers then.  Inside a
+    // supervisor call the SVC exit reloads them, so nothing is done there.
+    if (woke && !resumeFromMonitor && !inSupervisorCall_ && msp_ != nullptr && msp_->stopped()) {
+        restoreRegisters(currentRequestBlock_);
+        trace_.csp("{}: task 0009 woken with the MSP stopped - loaded the dispatched task's registers from request block "
+                   "{:06X}",
+                   call, currentRequestBlock_);
+    }
     return accepted;
 }
 

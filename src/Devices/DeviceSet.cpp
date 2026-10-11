@@ -150,6 +150,10 @@ DeviceSet::PendingCheckpoint DeviceSet::capturePendingCheckpoint() const
     }
     for (const auto& key : inputResponseStatus_.keys()) {
         const auto& status = *inputResponseStatus_.find(key);
+        // The checkpoint format has no imported flag.  Restoring an imported
+        // status as importable would replay its key, so it is left out; its
+        // field record is a live terminal queue, which is not saved either.
+        if (status.imported) continue;
         s.inputResponseStatus.push_back(key);
         s.inputResponseStatus.push_back(status.unitBlock);
         s.inputResponseStatus.push_back(static_cast<int>(status.bytes.size()));
@@ -563,7 +567,7 @@ bool DeviceSet::tryCompletePendingInput(int& completedIob)
     }
     for (auto& p : pendingC1Completions_.items()) {
         const InputResponseStatus* status = inputResponseStatus_.find(p.second->unit);
-        if (status == nullptr || status->unitBlock != p.second->unitBlock) continue;
+        if (status == nullptr || status->unitBlock != p.second->unitBlock || status->imported) continue;
         int unit = p.second->unit;
         applyC1Response(p.first, status->bytes);
         retireC1ResponseStatus(unit);
@@ -584,7 +588,7 @@ bool DeviceSet::tryCompletePendingInput(int& completedIob)
     for (auto& p : pendingPutWithInvites_.items()) {
         WorkStationSlot* slot = p.second->slot;
         const InputResponseStatus* status = inputResponseStatus_.find(slot->unitAddress());
-        if (status == nullptr || status->unitBlock != p.second->unitBlock) continue;
+        if (status == nullptr || status->unitBlock != p.second->unitBlock || status->imported) continue;
         if (!slot->backend()->tryCompleteInviteResponse()) continue;
         // Keep the control field through this action's following C1 pass.
         // Completing the retained A7 and importing its response status are
@@ -1053,7 +1057,7 @@ bool DeviceSet::beginOutputRequest(int iob, bool withInvite, bool& phaseResult)
         int unit = WorkStationIob::unitAddress(m_, iob);
         const int unitBlock = WorkStationIob::resolveUnitBlock(m_, iob);
         const InputResponseStatus* responseStatus = inputResponseStatus_.find(unit);
-        if (responseStatus != nullptr && responseStatus->unitBlock == unitBlock) {
+        if (responseStatus != nullptr && responseStatus->unitBlock == unitBlock && !responseStatus->imported) {
             applyC1Response(iob, responseStatus->bytes);
             retireC1ResponseStatus(unit);
             trace_.ws("  class C1 response completion -> wssmfrt; wscmdend/wsavstat imported and consumed one input WSCF");
@@ -1500,19 +1504,23 @@ void DeviceSet::applyC1Response(int iob, const std::vector<uint8_t>& responseSta
     m_.writeByte(tub + 0x8D, responseStatus[1]);
 }
 
-// A C1 pass imports the response status, but the terminal record that
-// carried it - the operator's typed fields - is still queued for SSP's
-// following Read Input Fields, and a pending read completes only while its
-// unit's response status is present.  Retiring the status here stranded that
-// read, so SSP parsed a stale buffer: a typed reply to a console message was
-// refused (SYS-5568 too many characters).  Keep the status while the record
-// is unread; the Read Input Fields that consumes it, or the next A7, retires
-// it.
+// A C1 pass imports the response status exactly once, but the terminal
+// record that carried it - the operator's typed fields - may still be queued
+// for SSP's following Read Input Fields, and a pending read completes only
+// while its unit's response status is present.  Erasing the status here
+// stranded that read, so SSP parsed a stale buffer: a typed reply to a console
+// message was refused (SYS-5568 too many characters).  Keeping it importable
+// was worse: a program that answers a roll key with another C1 wait instead
+// of a read (POP browsing a member) re-imported the same key forever.  So the
+// status is marked imported: no further C1 pass accepts it, the read still
+// does, and that read or the next A7 retires it.
 void DeviceSet::retireC1ResponseStatus(int unit)
 {
     WorkStationSlot* slot = workStations_.find(unit);
-    if (slot != nullptr && !slot->isPrinter && slot->backend()->pendingInput() > 0) {
-        trace_.ws("  unit {:02X} response status kept: its field record is unread and awaits Read Input Fields", unit);
+    InputResponseStatus* status = inputResponseStatus_.find(unit);
+    if (status != nullptr && slot != nullptr && !slot->isPrinter && slot->backend()->pendingInput() > 0) {
+        status->imported = true;
+        trace_.ws("  unit {:02X} response status imported; its field record stays readable by Read Input Fields", unit);
         return;
     }
     inputResponseStatus_.erase(unit);

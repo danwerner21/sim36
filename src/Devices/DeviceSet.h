@@ -274,6 +274,10 @@ private:
     struct InputResponseStatus {
         int unitBlock = 0;
         std::vector<uint8_t> bytes;
+        // A C1 pass has imported this status into the unit block.  It is not
+        // imported again (that would replay the key), but it still admits
+        // the Read Input Fields that consumes its field record.
+        bool imported = false;
     };
     struct PendingC1Completion {
         int unit = 0;
